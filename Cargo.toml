@@ -1,0 +1,13 @@
+[package]
+name = "nostr-pubkey"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bech32 = "0.9.1"
+getopts = "0.2.21"
+hex = "0.4.3"
+libsecp256k1 = "0.7.1"
+openssl = "0.10.45"
