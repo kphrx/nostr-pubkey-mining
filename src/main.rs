@@ -41,7 +41,7 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
     };
 
     let mut count = 0;
-    println!("{}", count);
+    print!("\x1B[?25l[{}]\r", count);
     let (skey_hex, pkey_bech32, pkey_hex) = loop {
         let skey_byte = if hex.is_some() {
             byte
@@ -66,14 +66,13 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
         };
 
         count = count+1;
-        print!("\x1B[1A\x1B[2K\r");
         if end {
-            println!("{}", count);
+            println!("\x1B[?25h[{}]", count);
             let skey_hex = skey_byte.encode_hex::<String>();
             let pkey_hex = pkey_byte.encode_hex::<String>();
             break (skey_hex, pkey_bech32, pkey_hex)
         }
-        println!("{}", count);
+        print!("[{}]\r", count);
     };
 
     let skey_byte = <[u8; 32]>::from_hex(skey_hex.clone()).expect("Decoding failed");
