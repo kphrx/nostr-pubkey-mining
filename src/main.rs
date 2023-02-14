@@ -1,18 +1,21 @@
 #![feature(split_array)]
-extern crate num_cpus;
 extern crate getopts;
+extern crate num_cpus;
 
 use std::env;
-use std::time;
-use std::sync::{mpsc, atomic::{AtomicUsize, AtomicBool, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc, Arc,
+};
 use std::thread::{self, JoinHandle};
+use std::time;
 
 use getopts::Options;
 
-use libsecp256k1::{SecretKey, PublicKey};
-use openssl::rand::rand_bytes;
 use bech32::{self, ToBase32, Variant};
 use hex::{FromHex, ToHex};
+use libsecp256k1::{PublicKey, SecretKey};
+use openssl::rand::rand_bytes;
 
 const CHARSET_REV: [i8; 128] = [
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -23,7 +26,7 @@ const CHARSET_REV: [i8; 128] = [
     -1, -1, -1, -1,
 ];
 
-fn gen_private_key(hex: Option<String>) -> [u8;32] {
+fn gen_private_key(hex: Option<String>) -> [u8; 32] {
     if let Some(hex) = hex {
         <[u8; 32]>::from_hex(hex).expect("Decoding failed")
     } else {
@@ -33,7 +36,7 @@ fn gen_private_key(hex: Option<String>) -> [u8;32] {
     }
 }
 
-fn gen_public_key(skey_bytes: [u8;32]) -> [u8;32] {
+fn gen_public_key(skey_bytes: [u8; 32]) -> [u8; 32] {
     let skey = SecretKey::parse(&skey_bytes).unwrap();
     let pkey = PublicKey::from_secret_key(&skey);
     let pkey_serialized = pkey.serialize_compressed();
@@ -42,7 +45,7 @@ fn gen_public_key(skey_bytes: [u8;32]) -> [u8;32] {
     *pkey_bytes
 }
 
-fn gen_keypair(hex: Option<String>) -> ([u8;32], [u8;32]) {
+fn gen_keypair(hex: Option<String>) -> ([u8; 32], [u8; 32]) {
     let skey_bytes = gen_private_key(hex);
     let pkey_bytes = gen_public_key(skey_bytes);
     (skey_bytes, pkey_bytes)
@@ -66,10 +69,10 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
         let prefix_bytes = bech32::convert_bits(&prefix5bit, 5, 8, true).expect("Conver failed");
         let prefix_length = prefix_bytes.len();
 
-        let wait = Arc::new(AtomicBool::new(false)); 
-        let finish = Arc::new(AtomicBool::new(false)); 
+        let wait = Arc::new(AtomicBool::new(false));
+        let finish = Arc::new(AtomicBool::new(false));
         let mut join_handle: Vec<JoinHandle<_>> = vec![];
-        let queue = Arc::new(AtomicUsize::new(0)); 
+        let queue = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel();
         let num = num_cpus::get();
         for _ in 0..num {
@@ -77,28 +80,26 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
             let finish = finish.clone();
             let queue = queue.clone();
             let tx = tx.clone();
-            let handle = thread::spawn(move || {
-                loop {
-                    if wait.load(Ordering::Relaxed) {
-                        thread::park();
-                        thread::sleep(time::Duration::from_micros(500));
-                    }
-                    if finish.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    queue.fetch_add(1, Ordering::SeqCst);
-
-                    let keypair = gen_keypair(None);
-                    tx.send(keypair).unwrap();
-
-                    thread::sleep(time::Duration::from_micros(5));
+            let handle = thread::spawn(move || loop {
+                if wait.load(Ordering::Relaxed) {
+                    thread::park();
+                    thread::sleep(time::Duration::from_micros(500));
                 }
+                if finish.load(Ordering::Relaxed) {
+                    break;
+                }
+                queue.fetch_add(1, Ordering::SeqCst);
+
+                let keypair = gen_keypair(None);
+                tx.send(keypair).unwrap();
+
+                thread::sleep(time::Duration::from_micros(5));
             });
             join_handle.push(handle)
         }
         let mut counter = 0;
         print!("Checked: {:?} \x1B[?25l\r", counter);
-        let (mut skey_bytes, mut pkey_bytes): ([u8;32], [u8;32]) = ([0u8; 32], [0u8; 32]);
+        let (mut skey_bytes, mut pkey_bytes): ([u8; 32], [u8; 32]) = ([0u8; 32], [0u8; 32]);
         'outer: for (skey, pkey) in rx {
             queue.fetch_sub(1, Ordering::SeqCst);
             let queue_count = queue.load(Ordering::SeqCst);
@@ -157,8 +158,10 @@ fn main() {
     opts.optopt("o", "", "set output filename", "FILENAME");
     opts.optflag("h", "help", "print this help menu");
     let matches = match opts.parse(&args[1..]) {
-        Ok(m) => { m }
-        Err(f) => { panic!("{}", f.to_string()) }
+        Ok(m) => m,
+        Err(f) => {
+            panic!("{}", f.to_string())
+        }
     };
     if matches.opt_present("h") {
         print_usage(&program, opts);
@@ -183,13 +186,13 @@ fn main() {
             println!("");
             println!("public npub: {}", pkey_bech32);
             println!("public  hex: {}", pkey_hex);
-        },
+        }
         None => {
             println!("secret nsec: {}", skey_bech32);
             println!("secret  hex: {}", skey_hex);
             println!("");
             println!("public npub: {}", pkey_bech32);
             println!("public  hex: {}", pkey_hex);
-        },
+        }
     }
 }
