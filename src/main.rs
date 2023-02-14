@@ -71,16 +71,16 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
 
         let wait = Arc::new(AtomicBool::new(false));
         let finish = Arc::new(AtomicBool::new(false));
-        let mut join_handle: Vec<JoinHandle<_>> = vec![];
         let queue = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = mpsc::channel();
         let num = num_cpus::get();
+        let mut worker_threads: Vec<JoinHandle<()>> = Vec::with_capacity(num);
         for _ in 0..num {
             let wait = wait.clone();
             let finish = finish.clone();
             let queue = queue.clone();
             let tx = tx.clone();
-            let handle = thread::spawn(move || loop {
+            let thread = thread::spawn(move || loop {
                 if wait.load(Ordering::Relaxed) {
                     thread::park();
                     thread::sleep(time::Duration::from_micros(500));
@@ -91,11 +91,13 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
                 queue.fetch_add(1, Ordering::SeqCst);
 
                 let keypair = gen_keypair(None);
-                tx.send(keypair).unwrap();
+                if let Err(_) = tx.send(keypair) {
+                    continue;
+                }
 
                 thread::sleep(time::Duration::from_micros(5));
             });
-            join_handle.push(handle)
+            worker_threads.push(thread)
         }
         let mut counter = 0;
         print!("Checked: {:?} \x1B[?25l\r", counter);
@@ -107,8 +109,8 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
                 wait.store(true, Ordering::Relaxed);
             } else if wait.load(Ordering::Relaxed) && queue_count > 5 {
                 wait.store(false, Ordering::Relaxed);
-                for handle in &join_handle {
-                    handle.thread().unpark();
+                for thread in &worker_threads {
+                    thread.thread().unpark();
                 }
             }
 
@@ -130,8 +132,8 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
             skey_bytes = skey;
             pkey_bytes = pkey;
             finish.store(true, Ordering::Relaxed);
-            for handle in &join_handle {
-                handle.thread().unpark();
+            for thread in &worker_threads {
+                thread.thread().unpark();
             }
             break;
         }
