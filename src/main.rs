@@ -11,30 +11,37 @@ use openssl::rand::rand_bytes;
 use bech32::{self, ToBase32, Variant};
 use hex::{FromHex, ToHex};
 
+const CHARSET_REV: [i8; 128] = [
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    15, -1, 10, 17, 21, 20, 26, 30, 7, 5, -1, -1, -1, -1, -1, -1, -1, 29, -1, 24, 13, 25, 9, 8, 23,
+    -1, 18, 22, 31, 27, 19, -1, 1, 0, 3, 16, 11, 28, 12, 14, 6, 4, 2, -1, -1, -1, -1, -1, -1, 29,
+    -1, 24, 13, 25, 9, 8, 23, -1, 18, 22, 31, 27, 19, -1, 1, 0, 3, 16, 11, 28, 12, 14, 6, 4, 2, -1,
+    -1, -1, -1, -1,
+];
+
 fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String, String) {
     let req_search: bool = hex.is_none() && pre.is_some();
 
-    let check_prefix = if req_search {
+    let prefix_bytes = if req_search {
         let p = pre.unwrap();
-        Some(move |npub: String| {
-            let mut ncs = npub.chars();
-            if Some('n') == ncs.next() && Some('p') == ncs.next() && Some('u') == ncs.next() && Some('b') == ncs.next() && Some('1') == ncs.next() {
-                for pc in p.chars() {
-                    if Some(pc) != ncs.next() {
-                        return false
-                    }
-                }
 
-                true
-            } else {
-                false
+        let mut prefix5bit: Vec<u8> = vec![];
+        for c in p.chars() {
+            let num_value = CHARSET_REV[c as usize];
+            if !(0..=31).contains(&num_value) {
+                panic!("invalid pubkey characters");
             }
-        })
-    } else {
-        None
-    };
+            prefix5bit.push(num_value as u8);
+        }
 
-    let byte = if let Some(ref h) = hex {
+        bech32::convert_bits(&prefix5bit, 5, 8, true).expect("Conver failed")
+    } else {
+        vec![]
+    };
+    let prefix_length = prefix_bytes.len();
+
+    let bytes = if let Some(ref h) = hex {
         <[u8; 32]>::from_hex(h).expect("Decoding failed")
     } else {
         [0; 32]
@@ -42,43 +49,45 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
 
     let mut count = 0;
     print!("\x1B[?25l[{}]\r", count);
-    let (skey_hex, pkey_bech32, pkey_hex) = loop {
-        let skey_byte = if hex.is_some() {
-            byte
+    'outer: loop {
+        count = count+1;
+        let skey_bytes = if hex.is_some() {
+            bytes
         } else {
-            let mut byte: [u8; 32] = [0; 32];
-            rand_bytes(&mut byte).unwrap();
+            let mut bytes: [u8; 32] = [0; 32];
+            rand_bytes(&mut bytes).unwrap();
 
-            byte
+            bytes
         };
 
-        let skey = SecretKey::parse(&skey_byte).unwrap();
+        let skey = SecretKey::parse(&skey_bytes).unwrap();
         let pkey = PublicKey::from_secret_key(&skey);
         let pkey_serialized = pkey.serialize_compressed();
-        let (_, pkey_byte) = pkey_serialized.rsplit_array_ref::<32>();
+        let (_, pkey_bytes) = pkey_serialized.rsplit_array_ref::<32>();
 
-        let pkey_bech32 = bech32::encode("npub", pkey_byte.to_base32(), Variant::Bech32).unwrap();
+        for i in 0..prefix_length {
+            let key_byte = pkey_bytes[i];
+            let pre_byte = prefix_bytes[i];
+            if i >= prefix_length - 1 && (key_byte < pre_byte || key_byte >= pre_byte + 32) {
+                print!("[{}]\r", count);
+                continue 'outer;
+            }
 
-        let end = if check_prefix.is_some() {
-            check_prefix.clone().unwrap()(pkey_bech32.clone())
-        } else {
-            true
-        };
-
-        count = count+1;
-        if end {
-            println!("\x1B[?25h[{}]", count);
-            let skey_hex = skey_byte.encode_hex::<String>();
-            let pkey_hex = pkey_byte.encode_hex::<String>();
-            break (skey_hex, pkey_bech32, pkey_hex)
+            if key_byte != pre_byte {
+                print!("[{}]\r", count);
+                continue 'outer;
+            }
         }
-        print!("[{}]\r", count);
-    };
 
-    let skey_byte = <[u8; 32]>::from_hex(skey_hex.clone()).expect("Decoding failed");
-    let skey_bech32 = bech32::encode("nsec", skey_byte.to_base32(), Variant::Bech32).unwrap();
+        println!("\x1B[?25h[{}]", count);
 
-    (skey_bech32, skey_hex, pkey_bech32, pkey_hex)
+        let skey_bech32 = bech32::encode("nsec", skey_bytes.to_base32(), Variant::Bech32).unwrap();
+        let pkey_bech32 = bech32::encode("npub", pkey_bytes.to_base32(), Variant::Bech32).unwrap();
+
+        let skey_hex = skey_bytes.encode_hex::<String>();
+        let pkey_hex = pkey_bytes.encode_hex::<String>();
+        break (skey_bech32, skey_hex, pkey_bech32, pkey_hex)
+    }
 }
 
 fn print_usage(program: &str, opts: Options) {
