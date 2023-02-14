@@ -1,13 +1,16 @@
 #![feature(split_array)]
+extern crate num_cpus;
 extern crate getopts;
 
 use std::env;
+use std::time;
+use std::sync::{mpsc, atomic::{AtomicUsize, AtomicBool, Ordering}, Arc};
+use std::thread::{self, JoinHandle};
 
 use getopts::Options;
 
 use libsecp256k1::{SecretKey, PublicKey};
 use openssl::rand::rand_bytes;
-
 use bech32::{self, ToBase32, Variant};
 use hex::{FromHex, ToHex};
 
@@ -20,12 +23,38 @@ const CHARSET_REV: [i8; 128] = [
     -1, -1, -1, -1,
 ];
 
+fn gen_private_key(hex: Option<String>) -> [u8;32] {
+    if let Some(hex) = hex {
+        <[u8; 32]>::from_hex(hex).expect("Decoding failed")
+    } else {
+        let mut bytes: [u8; 32] = [0; 32];
+        rand_bytes(&mut bytes).unwrap();
+        bytes
+    }
+}
+
+fn gen_public_key(skey_bytes: [u8;32]) -> [u8;32] {
+    let skey = SecretKey::parse(&skey_bytes).unwrap();
+    let pkey = PublicKey::from_secret_key(&skey);
+    let pkey_serialized = pkey.serialize_compressed();
+    let (_, pkey_bytes) = pkey_serialized.rsplit_array_ref::<32>();
+
+    *pkey_bytes
+}
+
+fn gen_keypair(hex: Option<String>) -> ([u8;32], [u8;32]) {
+    let skey_bytes = gen_private_key(hex);
+    let pkey_bytes = gen_public_key(skey_bytes);
+    (skey_bytes, pkey_bytes)
+}
+
 fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String, String) {
     let req_search: bool = hex.is_none() && pre.is_some();
 
-    let prefix_bytes = if req_search {
+    let (skey_bytes, pkey_bytes) = if !req_search {
+        gen_keypair(hex)
+    } else {
         let p = pre.unwrap();
-
         let mut prefix5bit: Vec<u8> = vec![];
         for c in p.chars() {
             let num_value = CHARSET_REV[c as usize];
@@ -34,60 +63,84 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
             }
             prefix5bit.push(num_value as u8);
         }
+        let prefix_bytes = bech32::convert_bits(&prefix5bit, 5, 8, true).expect("Conver failed");
+        let prefix_length = prefix_bytes.len();
 
-        bech32::convert_bits(&prefix5bit, 5, 8, true).expect("Conver failed")
-    } else {
-        vec![]
-    };
-    let prefix_length = prefix_bytes.len();
+        let wait = Arc::new(AtomicBool::new(false)); 
+        let finish = Arc::new(AtomicBool::new(false)); 
+        let mut join_handle: Vec<JoinHandle<_>> = vec![];
+        let queue = Arc::new(AtomicUsize::new(0)); 
+        let (tx, rx) = mpsc::channel();
+        let num = num_cpus::get();
+        for _ in 0..num {
+            let wait = wait.clone();
+            let finish = finish.clone();
+            let queue = queue.clone();
+            let tx = tx.clone();
+            let handle = thread::spawn(move || {
+                loop {
+                    if wait.load(Ordering::Relaxed) {
+                        thread::park();
+                        thread::sleep(time::Duration::from_micros(500));
+                    }
+                    if finish.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    queue.fetch_add(1, Ordering::SeqCst);
 
-    let bytes = if let Some(ref h) = hex {
-        <[u8; 32]>::from_hex(h).expect("Decoding failed")
-    } else {
-        [0; 32]
-    };
+                    let keypair = gen_keypair(None);
+                    tx.send(keypair).unwrap();
 
-    let mut count = 0;
-    print!("\x1B[?25l[{}]\r", count);
-    'outer: loop {
-        count = count+1;
-        let skey_bytes = if hex.is_some() {
-            bytes
-        } else {
-            let mut bytes: [u8; 32] = [0; 32];
-            rand_bytes(&mut bytes).unwrap();
-
-            bytes
-        };
-
-        let skey = SecretKey::parse(&skey_bytes).unwrap();
-        let pkey = PublicKey::from_secret_key(&skey);
-        let pkey_serialized = pkey.serialize_compressed();
-        let (_, pkey_bytes) = pkey_serialized.rsplit_array_ref::<32>();
-
-        for i in 0..prefix_length {
-            let key_byte = pkey_bytes[i];
-            let pre_byte = prefix_bytes[i];
-            if i >= prefix_length - 1 && (key_byte < pre_byte || key_byte >= pre_byte + 32) {
-                print!("[{}]\r", count);
-                continue 'outer;
-            }
-
-            if key_byte != pre_byte {
-                print!("[{}]\r", count);
-                continue 'outer;
-            }
+                    thread::sleep(time::Duration::from_micros(5));
+                }
+            });
+            join_handle.push(handle)
         }
+        let mut counter = 0;
+        print!("Checked: {:?} \x1B[?25l\r", counter);
+        let (mut skey_bytes, mut pkey_bytes): ([u8;32], [u8;32]) = ([0u8; 32], [0u8; 32]);
+        'outer: for (skey, pkey) in rx {
+            queue.fetch_sub(1, Ordering::SeqCst);
+            let queue_count = queue.load(Ordering::SeqCst);
+            if queue_count > 10 {
+                wait.store(true, Ordering::Relaxed);
+            } else if wait.load(Ordering::Relaxed) && queue_count > 5 {
+                wait.store(false, Ordering::Relaxed);
+                for handle in &join_handle {
+                    handle.thread().unpark();
+                }
+            }
 
-        println!("\x1B[?25h[{}]", count);
+            counter += 1;
+            for i in 0..prefix_length {
+                let key_byte = pkey[i];
+                let pre_byte = prefix_bytes[i];
 
-        let skey_bech32 = bech32::encode("nsec", skey_bytes.to_base32(), Variant::Bech32).unwrap();
-        let pkey_bech32 = bech32::encode("npub", pkey_bytes.to_base32(), Variant::Bech32).unwrap();
-
-        let skey_hex = skey_bytes.encode_hex::<String>();
-        let pkey_hex = pkey_bytes.encode_hex::<String>();
-        break (skey_bech32, skey_hex, pkey_bech32, pkey_hex)
-    }
+                if i >= prefix_length - 1 && (key_byte < pre_byte || key_byte >= pre_byte + 32) {
+                    print!("Checked: {:?} \r", counter);
+                    continue 'outer;
+                }
+                if key_byte != pre_byte {
+                    print!("Checked: {:?} \r", counter);
+                    continue 'outer;
+                }
+            }
+            println!("Checked: {:?} \x1B[?25h", counter);
+            skey_bytes = skey;
+            pkey_bytes = pkey;
+            finish.store(true, Ordering::Relaxed);
+            for handle in &join_handle {
+                handle.thread().unpark();
+            }
+            break;
+        }
+        (skey_bytes, pkey_bytes)
+    };
+    let skey_bech32 = bech32::encode("nsec", skey_bytes.to_base32(), Variant::Bech32).unwrap();
+    let pkey_bech32 = bech32::encode("npub", pkey_bytes.to_base32(), Variant::Bech32).unwrap();
+    let skey_hex = skey_bytes.encode_hex::<String>();
+    let pkey_hex = pkey_bytes.encode_hex::<String>();
+    (skey_bech32, skey_hex, pkey_bech32, pkey_hex)
 }
 
 fn print_usage(program: &str, opts: Options) {
@@ -118,6 +171,7 @@ fn main() {
     } else {
         None
     };
+
     let (skey_bech32, skey_hex, pkey_bech32, pkey_hex) = do_work(hex, prefix);
 
     match output {
