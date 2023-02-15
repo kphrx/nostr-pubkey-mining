@@ -55,7 +55,7 @@ fn gen_keypair(hex: Option<String>) -> ([u8; 32], [u8; 32]) {
     (skey_bytes, pkey_bytes)
 }
 
-fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String, String, usize) {
+fn do_work(hex: Option<String>, pre: Option<String>, sleep: usize) -> (String, String, String, String, usize) {
     let req_search: bool = hex.is_none() && pre.is_some();
 
     let (skey_bytes, pkey_bytes, counter) = if !req_search {
@@ -102,8 +102,9 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
                     }
                     continue;
                 }
-
-                thread::sleep(time::Duration::from_micros(5));
+                if sleep > 0 {
+                    thread::sleep(time::Duration::from_micros(sleep as u64));
+                }
             });
             worker_threads.push(thread)
         }
@@ -165,6 +166,7 @@ fn main() {
 
     let mut opts = Options::new();
     opts.optopt("p", "prefix", "mining npub key", "PREFIX");
+    opts.optopt("s", "thread-sleep", "throttle thread loop", "MICROSECONDS");
     opts.optopt("o", "output", "set output filename. recommended extension '.toml'", "FILENAME");
     opts.optflag("O", "save-file", "output to nostr-key-PREFIX.toml or nostr-key.toml");
     opts.optflag("h", "help", "print this help menu");
@@ -180,6 +182,11 @@ fn main() {
     }
     let prefix = matches.opt_str("p");
     let output = matches.opt_str("o");
+    let sleep = if let Some(s) = matches.opt_str("s") {
+        s.parse::<usize>().expect("thread-sleep required unsigned number")
+    } else {
+        0
+    };
     let hex = if !matches.free.is_empty() {
         Some(matches.free[0].clone())
     } else {
@@ -188,7 +195,7 @@ fn main() {
 
     let start = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     println!("Mining start time: {}", start);
-    let (skey_bech32, skey_hex, pkey_bech32, pkey_hex, checked) = do_work(hex, prefix.clone());
+    let (skey_bech32, skey_hex, pkey_bech32, pkey_hex, checked) = do_work(hex.clone(), prefix.clone(), sleep);
     let end = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     println!("Mining end time: {}", end);
 
