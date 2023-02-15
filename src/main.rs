@@ -9,8 +9,12 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time;
+use std::path::Path;
+use std::fs::File;
+use std::io::prelude::*;
 
 use getopts::Options;
+use chrono::prelude::*;
 
 use bech32::{self, ToBase32, Variant};
 use hex::{FromHex, ToHex};
@@ -51,11 +55,12 @@ fn gen_keypair(hex: Option<String>) -> ([u8; 32], [u8; 32]) {
     (skey_bytes, pkey_bytes)
 }
 
-fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String, String) {
+fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String, String, usize) {
     let req_search: bool = hex.is_none() && pre.is_some();
 
-    let (skey_bytes, pkey_bytes) = if !req_search {
-        gen_keypair(hex)
+    let (skey_bytes, pkey_bytes, counter) = if !req_search {
+        let (s, p) = gen_keypair(hex);
+        (s, p, 0)
     } else {
         let p = pre.unwrap();
         let mut prefix5bit: Vec<u8> = vec![];
@@ -92,6 +97,9 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
 
                 let keypair = gen_keypair(None);
                 if let Err(_) = tx.send(keypair) {
+                    if finish.load(Ordering::Relaxed) {
+                        break;
+                    }
                     continue;
                 }
 
@@ -99,7 +107,7 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
             });
             worker_threads.push(thread)
         }
-        let mut counter = 0;
+        let mut counter: usize = 0;
         print!("Checked: {:?} \x1B[?25l\r", counter);
         let (mut skey_bytes, mut pkey_bytes): ([u8; 32], [u8; 32]) = ([0u8; 32], [0u8; 32]);
         'outer: for (skey, pkey) in rx {
@@ -137,13 +145,13 @@ fn do_work(hex: Option<String>, pre: Option<String>) -> (String, String, String,
             }
             break;
         }
-        (skey_bytes, pkey_bytes)
+        (skey_bytes, pkey_bytes, counter)
     };
     let skey_bech32 = bech32::encode("nsec", skey_bytes.to_base32(), Variant::Bech32).unwrap();
     let pkey_bech32 = bech32::encode("npub", pkey_bytes.to_base32(), Variant::Bech32).unwrap();
     let skey_hex = skey_bytes.encode_hex::<String>();
     let pkey_hex = pkey_bytes.encode_hex::<String>();
-    (skey_bech32, skey_hex, pkey_bech32, pkey_hex)
+    (skey_bech32, skey_hex, pkey_bech32, pkey_hex, counter)
 }
 
 fn print_usage(program: &str, opts: Options) {
@@ -177,24 +185,40 @@ fn main() {
         None
     };
 
-    let (skey_bech32, skey_hex, pkey_bech32, pkey_hex) = do_work(hex, prefix);
+    let start = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    println!("Mining start time: {}", start);
+    let (skey_bech32, skey_hex, pkey_bech32, pkey_hex, checked) = do_work(hex, prefix.clone());
+    let end = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    println!("Mining end time: {}", end);
 
-    match output {
-        Some(x) => {
-            println!("Output: {}", x);
-            println!("");
-            println!("secret nsec: {}", skey_bech32);
-            println!("secret  hex: {}", skey_hex);
-            println!("");
-            println!("public npub: {}", pkey_bech32);
-            println!("public  hex: {}", pkey_hex);
+    println!("secret nsec: {}", skey_bech32);
+    println!("        hex: {}", skey_hex);
+    println!("public npub: {}", pkey_bech32);
+    println!("        hex: {}", pkey_hex);
+
+    if let Some(filename) = output {
+        let path = Path::new(&filename);
+        let mut file = match File::create(&path) {
+            Err(why) => {
+                panic!("couldn't open {}: {}", path.display(), why);
+            }
+            Ok(file) => {
+                println!("write to {}", path.display());
+                file
+            }
+        };
+
+        write!(file, "[meta]\n").unwrap();
+        if let Some(pre) = prefix {
+            write!(file, "mining = {{ prefix = {}, count = {} }}\n", pre, checked).unwrap();
+            write!(file, "started = \"{}\"\n", start).unwrap();
         }
-        None => {
-            println!("secret nsec: {}", skey_bech32);
-            println!("secret  hex: {}", skey_hex);
-            println!("");
-            println!("public npub: {}", pkey_bech32);
-            println!("public  hex: {}", pkey_hex);
-        }
+        write!(file, "created = \"{}\"\n", end).unwrap();
+        write!(file, "[secret]\n").unwrap();
+        write!(file, "nsec = \"{}\"\n", skey_bech32).unwrap();
+        write!(file, "hex = \"{}\"\n", skey_hex).unwrap();
+        write!(file, "[public]\n").unwrap();
+        write!(file, "npub = \"{}\"\n", pkey_bech32).unwrap();
+        write!(file, "hex = \"{}\"\n", pkey_hex).unwrap();
     }
 }
