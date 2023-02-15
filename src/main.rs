@@ -164,8 +164,9 @@ fn main() {
     let program = args[0].clone();
 
     let mut opts = Options::new();
-    opts.optopt("p", "", "mining npub key", "PREFIX");
-    opts.optopt("o", "", "set output filename", "FILENAME");
+    opts.optopt("p", "prefix", "mining npub key", "PREFIX");
+    opts.optopt("o", "output", "set output filename. recommended extension '.toml'", "FILENAME");
+    opts.optflag("O", "save-file", "output to nostr-key-PREFIX.toml or nostr-key.toml");
     opts.optflag("h", "help", "print this help menu");
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
@@ -196,8 +197,21 @@ fn main() {
     println!("public npub: {}", pkey_bech32);
     println!("        hex: {}", pkey_hex);
 
-    if let Some(filename) = output {
-        let path = Path::new(&filename);
+    let filename = if output.is_none() && matches.opt_present("O") {
+        let output = if let Some(_) = &hex {
+            format!("nostr-key.toml")
+        } else if let Some(pre) = &prefix {
+            format!("nostr-key-{}.toml", pre)
+        } else {
+            format!("nostr-key.toml")
+        };
+        Some(output)
+    } else {
+        output
+    };
+
+    if let Some(f) = filename {
+        let path = Path::new(&f);
         let mut file = match File::create(&path) {
             Err(why) => {
                 panic!("couldn't open {}: {}", path.display(), why);
